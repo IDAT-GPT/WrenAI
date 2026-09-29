@@ -4,15 +4,19 @@ This is IDAT's fork of [Canner/WrenAI](https://github.com/Canner/WrenAI), the
 open-source semantic engine. Upstream's own documentation is in
 [README.md](README.md) — this file covers only **what IDAT changed and why**.
 
-We run Wren as a **long-lived MCP server**: one process, started at logon on the
-build server `10.0.0.206`, answering queries from IDAT-GPT and other agents
-against the CRM semantic model in
+We run Wren as a **long-lived MCP server**: one process, started at logon on an
+internal server, answering queries from IDAT-GPT and other agents against the
+CRM semantic model in
 [IDAT-GPT/idat-crm](https://github.com/IDAT-GPT/idat-crm). Upstream Wren is
 designed and tested mainly as a short-lived CLI, and three things broke under
 that long-running, network-served usage. This fork fixes them.
 
 > **This fork is for IDAT's own deployment. We do not open pull requests
 > upstream from it.**
+>
+> Deployment specifics — hosts, ports, service names, paths — are deliberately
+> **not** in this file. This repository is a public fork. They live in
+> `idat-crm`, which is private.
 
 ---
 
@@ -24,10 +28,9 @@ that long-running, network-served usage. This fork fixes them.
 | `main` | Plain mirror of `Canner/WrenAI` `main`. Never commit here — it exists so we can rebase onto it. |
 | everything else | Inherited from the upstream fork. Ignore. |
 
-Whichever branch is checked out in `C:\Users\GPT-Admin\WrenAI` **is what the
-live MCP server runs** — the service uses an editable install pointing straight
-at `core/wren/src` in this working tree (see §4). Leave `idat-gpt` checked out
-on that machine.
+The service runs an **editable install** of `core/wren`, so whichever branch is
+checked out in the working tree is what the live MCP server executes. Leave
+`idat-gpt` checked out on the server.
 
 ---
 
@@ -41,7 +44,7 @@ fix was written.
 `wren serve mcp --transport http --host 0.0.0.0` bound the socket to all
 interfaces but answered `421 Invalid Host header` to every request that did not
 arrive as `127.0.0.1` or `localhost` — so a wildcard bind was useless and no
-other machine on the LAN could reach it.
+other machine on the network could reach it.
 
 `FastMCP.__init__` decides *at construction time* whether to enable
 DNS-rebinding protection, and when `host` is loopback it builds a
@@ -99,7 +102,9 @@ returns 20 rows instead of failing.
 lands on a commented-out line. That was equally broken before this change and
 has not been seen in practice.
 
-### Tests
+---
+
+## 3. Tests
 
 | File | Covers |
 |---|---|
@@ -112,13 +117,19 @@ None of them need a database.
 
 ```bash
 cd core/wren
-.venv/Scripts/python.exe -m pytest tests/unit/test_mysql_apply_limit.py \
-    tests/unit/test_mysql_reconnect.py tests/unit/test_mysql_semicolon_unlimited.py -q
+uv run --no-sync pytest tests/unit/test_mysql_apply_limit.py \
+    tests/unit/test_mysql_reconnect.py \
+    tests/unit/test_mysql_semicolon_unlimited.py \
+    tests/unit/test_mcp_server.py -q
 ```
+
+Note that the rest of `tests/unit/` needs the optional extras from
+`pyproject.toml`; a `--extra mysql --extra mcp` environment will show unrelated
+failures in the memory and Postgres suites.
 
 ---
 
-## 3. Keeping up with upstream
+## 4. Keeping up with upstream
 
 ```bash
 git fetch origin                 # origin = Canner/WrenAI
@@ -128,37 +139,11 @@ git switch idat-gpt && git rebase origin/main
 
 Rebase, do not merge — the fork is three commits plus a README, and a linear
 history makes it obvious what is ours. Expect conflicts in
-`core/wren/src/wren/connector/mysql.py`; upstream is actively changing that file.
+`core/wren/src/wren/connector/mysql.py`; upstream is actively changing that
+file, and all three of our fixes touch it or `mcp_server.py`.
 
-After a rebase, re-run the four test files above **and** restart the MCP service,
-because the service runs this working tree.
-
----
-
-## 4. How the fork is deployed
-
-The build server runs an editable install of `core/wren` from this checkout:
-
-```
-C:\Users\GPT-Admin\WrenAI\core\wren\.venv\Scripts\wren.exe
-  → editable, resolves to C:\Users\GPT-Admin\WrenAI\core\wren\src
-```
-
-started by the scheduled task `WrenMCP-idat-crm` on
-`http://10.0.0.206:8081/mcp`. Full deployment details — the wrapper script, the
-firewall rule, why port 8081 and not 8080 — are in
-[IDAT-GPT/idat-crm](https://github.com/IDAT-GPT/idat-crm)'s README, §5.
-
-Rebuilding the environment (`uv` is on PATH, `just` and a bare `python` are not):
-
-```bash
-cd core/wren
-uv sync --extra mysql --extra mcp
-```
-
-The Docker deployment in `idat-crm/deploy/` installs **upstream** `wrenai` from
-PyPI and therefore does *not* carry these fixes. Only the Windows service runs
-the fork.
+After a rebase, re-run the four test files above **and restart the MCP
+service**, because the service runs this working tree.
 
 ---
 
@@ -166,6 +151,6 @@ the fork.
 
 | Repository | What it is |
 |---|---|
-| [IDAT-GPT/idat-crm](https://github.com/IDAT-GPT/idat-crm) | The semantic model this engine serves, and the deployment details. |
-| [IDAT-GPT/onyx](https://github.com/IDAT-GPT/onyx) | IDAT-GPT, the AI platform at http://10.0.0.206 that queries this server. |
+| [IDAT-GPT/idat-crm](https://github.com/IDAT-GPT/idat-crm) *(private)* | The semantic model this engine serves, and every deployment detail. |
+| [IDAT-GPT/onyx](https://github.com/IDAT-GPT/onyx) | IDAT-GPT, the AI platform that queries this server. |
 | [Canner/WrenAI](https://github.com/Canner/WrenAI) | Upstream. |
