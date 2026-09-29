@@ -18,7 +18,13 @@ def _make_connector() -> tuple[MySqlConnector, MagicMock]:
     cursor.fetchall.return_value = ((1,),)
     conn = MagicMock()
     conn.cursor.return_value = cursor
+    # ``query`` checks liveness before executing, so the fixture needs the same
+    # attributes ``__init__`` sets: a ``ping``-able connection (MagicMock's
+    # auto-attribute returns without raising, i.e. "alive"), the closed flag,
+    # and the kwargs a reconnect would use.
     connector.connection = conn
+    connector._closed = False
+    connector._connect_kwargs = {"host": "127.0.0.1"}
     return connector, cursor
 
 
@@ -32,7 +38,9 @@ def test_query_strips_semicolon_when_unlimited(monkeypatch: pytest.MonkeyPatch) 
     cursor.execute.assert_called_once_with("SELECT 1")
 
 
-def test_query_limit_path_still_strips_via_apply_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_query_limit_path_still_strips_via_apply_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "wren.connector.mysql._build_mysql_arrow_table",
         lambda cursor: object(),

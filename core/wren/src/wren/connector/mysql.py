@@ -47,27 +47,24 @@ class MySqlConnector(ConnectorABC):
     """Native MySQLdb connector that bypasses ibis-project."""
 
     def __init__(self, connection_info):
+        self._closed = False
+        self._connect_kwargs = _build_mysql_connect_kwargs(connection_info)
+        self.connection = self._open()
+
+    def _open(self):
+        """Open a connection and run the session init statements."""
         import MySQLdb  # noqa: PLC0415
 
-        self._closed = False
-        self.connection = MySQLdb.connect(
-            **_build_mysql_connect_kwargs(connection_info)
-        )
-        # Append ANSI_QUOTES to the server-configured sql_mode so identifiers
-        # quoted as "name" (the MDL convention) are accepted. CONCAT preserves
-        # the server defaults (ONLY_FULL_GROUP_BY, STRICT_TRANS_TABLES, …) —
-        # overwriting them would let queries silently behave differently than
-        # in the user's own MySQL session.
-        #
-        # If this init query fails we MUST close the connection so it isn't
+        connection = MySQLdb.connect(**self._connect_kwargs)
+        # If an init query fails we MUST close the connection so it isn't
         # leaked; the cursor exception would otherwise leave a live socket
         # held by the (now half-constructed) connector.
         try:
-            with closing(self.connection.cursor()) as cursor:
-                cursor.execute("SET sql_mode=CONCAT(@@sql_mode, ',ANSI_QUOTES')")
+            with closing(connection.cursor()) as cursor:
+                self._init_session(cursor)
         except Exception:
             try:
-                self.connection.close()
+                connection.close()
             except Exception as close_err:
                 logger.warning(
                     f"Error closing MySQL connection after init failure: {close_err}"
@@ -75,6 +72,54 @@ class MySqlConnector(ConnectorABC):
             finally:
                 self._closed = True
             raise
+        return connection
+
+    def _init_session(self, cursor) -> None:
+        """Per-connection session setup. Re-applied on every reconnect.
+
+        Append ANSI_QUOTES to the server-configured sql_mode so identifiers
+        quoted as "name" (the MDL convention) are accepted. CONCAT preserves
+        the server defaults (ONLY_FULL_GROUP_BY, STRICT_TRANS_TABLES, …) —
+        overwriting them would let queries silently behave differently than
+        in the user's own MySQL session.
+        """
+        cursor.execute("SET sql_mode=CONCAT(@@sql_mode, ',ANSI_QUOTES')")
+
+    def _ensure_connection(self) -> None:
+        """Reopen the connection if the server has closed it.
+
+        A connector outlives a single request — the MCP server holds one for
+        the lifetime of the process. MySQL closes any connection idle longer
+        than ``wait_timeout`` (28800 s / 8 h by default), after which every
+        statement fails with 2006 "MySQL server has gone away" until the
+        process is restarted.
+
+        We ping *before* executing rather than retrying after a failure:
+        a retry would re-send a statement that may already have reached the
+        server, which is unsafe for anything that writes. ``ping()`` is a
+        sub-millisecond round-trip on a healthy connection.
+
+        ``ping(reconnect=True)`` is deliberately not used: MySQL 8.0.33
+        deprecated MYSQL_OPT_RECONNECT and mysqlclient deprecated the
+        parameter in 2.2.1, and a driver-level reconnect would silently skip
+        ``_init_session``, leaving the new connection without ANSI_QUOTES.
+        """
+        if self._closed:
+            raise WrenError(
+                ErrorCode.GET_CONNECTION_ERROR,
+                "Connector is closed; open a new connector to run queries",
+            )
+        try:
+            self.connection.ping()
+            return
+        except Exception as e:
+            logger.info(f"MySQL connection is stale ({e}); reconnecting")
+        try:
+            self.connection.close()
+        except Exception:
+            # Already dead — nothing to release beyond the local handle.
+            pass
+        self.connection = self._open()
 
     def query(self, sql: str, limit: int | None = None) -> pa.Table:
         limit = coerce_limit(limit)
@@ -84,6 +129,7 @@ class MySqlConnector(ConnectorABC):
             # Unlimited path: strip trailing terminators so client-pasted SQL
             # matches EXPLAIN / limit composition.
             sql = self._strip(sql)
+        self._ensure_connection()
         with closing(self.connection.cursor()) as cursor:
             cursor.execute(sql)
             return _build_mysql_arrow_table(cursor)
@@ -95,6 +141,7 @@ class MySqlConnector(ConnectorABC):
         # surface duplicate column names. We strip a trailing semicolon to
         # match the same compose-ability we use for ``query``'s LIMIT path.
         explain_sql = f"EXPLAIN {self._strip(sql)}"
+        self._ensure_connection()
         with closing(self.connection.cursor()) as cursor:
             cursor.execute(explain_sql)
             cursor.fetchall()
@@ -114,14 +161,13 @@ class DorisConnector(MySqlConnector):
     """Doris connector. Speaks MySQL protocol; routes through Doris connection."""
 
     def __init__(self, connection_info):
-        import MySQLdb  # noqa: PLC0415
-
-        # Skip MySqlConnector.__init__ — Doris does not accept the ANSI_QUOTES
-        # init command.
         self._closed = False
-        self.connection = MySQLdb.connect(
-            **_build_doris_connect_kwargs(connection_info)
-        )
+        self._connect_kwargs = _build_doris_connect_kwargs(connection_info)
+        self.connection = self._open()
+
+    def _init_session(self, cursor) -> None:
+        """Doris does not accept the ANSI_QUOTES init command."""
+        return
 
 
 def create_connector(data_source: DataSource, connection_info) -> MySqlConnector:
