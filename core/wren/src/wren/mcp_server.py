@@ -684,9 +684,22 @@ def _register_prompts(mcp: FastMCP, ctx: ServeContext) -> None:
         return _workflow_text(ctx, question)
 
 
-def build_server(ctx: ServeContext) -> FastMCP:
-    """Build and register all tools on a FastMCP server instance."""
-    mcp = FastMCP("wren")
+def build_server(
+    ctx: ServeContext,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8080,
+) -> FastMCP:
+    """Build and register all tools on a FastMCP server instance.
+
+    ``host``/``port`` must reach FastMCP at construction time: the SDK decides
+    there whether to enable DNS-rebinding protection, and it does so with a
+    localhost-only ``allowed_hosts`` list whenever ``host`` is loopback.
+    Assigning ``settings.host`` afterwards keeps that list, so an HTTP server
+    bound to ``0.0.0.0`` would reject every request whose ``Host`` header is
+    not ``127.0.0.1``/``localhost`` with ``421 Invalid Host header``.
+    """
+    mcp = FastMCP("wren", host=host, port=port)
 
     _register_query_tools(mcp, ctx)
     _register_context_tools(mcp, ctx)
@@ -707,13 +720,11 @@ def run_server(
     port: int = 8080,
 ) -> None:
     """Build the FastMCP server and run it on the given transport."""
-    mcp = build_server(ctx)
+    mcp = build_server(ctx, host=host, port=port)
 
     if transport == "stdio":
         mcp.run(transport="stdio")
     elif transport == "http":
-        mcp.settings.host = host
-        mcp.settings.port = port
         logger.info(f"Serving wren MCP over streamable-http at {host}:{port}")
         mcp.run(transport="streamable-http")
     else:

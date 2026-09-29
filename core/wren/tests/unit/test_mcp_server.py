@@ -524,3 +524,27 @@ def test_query_cube_order_by_bad_spec_is_readable():
             order_by=["", "total_revenue:desc"],
             sql_only=True,
         )
+
+
+# ── HTTP bind host reaches FastMCP at construction time ─────────────────────
+
+
+def test_build_server_passes_bind_host_to_fastmcp(tmp_path):
+    """`--host 0.0.0.0` must not keep the SDK's localhost-only Host check.
+
+    FastMCP fixes its DNS-rebinding settings in ``__init__`` based on ``host``;
+    setting ``settings.host`` later (the previous behaviour) left the
+    loopback-only ``allowed_hosts`` in place, so a wildcard-bound server
+    answered ``421 Invalid Host header`` to any non-localhost client.
+    """
+    ctx = _make_ctx(tmp_path)
+
+    loopback = build_server(ctx)
+    assert loopback.settings.host == "127.0.0.1"
+    assert loopback.settings.transport_security is not None
+    assert loopback.settings.transport_security.enable_dns_rebinding_protection
+
+    wide = build_server(ctx, host="0.0.0.0", port=8765)
+    assert wide.settings.host == "0.0.0.0"
+    assert wide.settings.port == 8765
+    assert wide.settings.transport_security is None
