@@ -11,6 +11,7 @@ only differs in how the connection is opened.
 from __future__ import annotations
 
 import json
+import re
 from contextlib import closing
 from decimal import Decimal as PyDecimal
 from decimal import InvalidOperation
@@ -27,20 +28,56 @@ from wren.connector.base import (
 from wren.model.data_source import DataSource
 from wren.model.error import ErrorCode, WrenError
 
+# A ``LIMIT`` clause terminating the statement, in all three MySQL spellings:
+# ``LIMIT n``, ``LIMIT offset, count`` and ``LIMIT count OFFSET offset``.
+# Anchored at the end so a ``LIMIT`` inside a subquery or a string literal is
+# not matched -- a literal must close with a quote, which the anchor rejects.
+_TRAILING_LIMIT_RE = re.compile(
+    r"\bLIMIT\s+(?:(\d+)\s*,\s*(\d+)|(\d+)\s+OFFSET\s+(\d+)|(\d+))\s*\Z",
+    re.IGNORECASE,
+)
+
 
 def _apply_limit(sql: str, limit: int, dialect: str | None = None) -> str:
-    """Append ``LIMIT n`` to a user-supplied SQL string.
+    """Bound a user-supplied SQL string to at most ``limit`` rows.
 
-    Strips any trailing semicolon and whitespace, then appends ``LIMIT n``.
-    ``limit`` MUST already be validated as a non-negative ``int`` by the caller
-    — this helper does not re-validate to keep the call site explicit.
+    Strips any trailing semicolon and whitespace first. ``limit`` MUST already
+    be validated as a non-negative ``int`` by the caller — this helper does not
+    re-validate, to keep the call site explicit.
+
+    If the statement already ends in its own ``LIMIT``, that clause is
+    reconciled with ``limit`` instead of a second one being appended. Appending
+    blindly produced ``LIMIT 20\\nLIMIT 21``, which MySQL rejects with error
+    1064 — so any caller-written ``LIMIT`` made the whole query fail. The
+    existing clause wins when it is already at least as restrictive; otherwise
+    its row count is lowered to ``limit`` and any OFFSET is preserved.
 
     Wrapping the user SQL in ``SELECT * FROM (...) AS _sub LIMIT n`` was
     rejected because it fails with ``ER_DUP_FIELDNAME`` whenever the inner
     SELECT projects two columns with the same name (e.g. a join that selects
     ``a.id`` and ``b.id``).
     """
-    return f"{strip_trailing_semicolon(sql, dialect)}\nLIMIT {limit}"
+    sql = strip_trailing_semicolon(sql, dialect)
+    match = _TRAILING_LIMIT_RE.search(sql)
+    if match is None:
+        return f"{sql}\nLIMIT {limit}"
+
+    pair_offset, pair_count, offset_count, offset_value, plain_count = match.groups()
+    if pair_count is not None:
+        existing = int(pair_count)
+        replacement = f"LIMIT {pair_offset}, {limit}"
+    elif offset_count is not None:
+        existing = int(offset_count)
+        replacement = f"LIMIT {limit} OFFSET {offset_value}"
+    else:
+        existing = int(plain_count)
+        replacement = f"LIMIT {limit}"
+
+    # The caller's cap is an upper bound, not an override: a tighter limit the
+    # user asked for must survive untouched.
+    if existing <= limit:
+        return sql
+    return sql[: match.start()] + replacement
 
 
 class MySqlConnector(ConnectorABC):
